@@ -1,0 +1,11 @@
+menu "Virtio Peer Driver"
+
+# VPEER always gets selected by whoever wants it
+config VPEER
+	tristate "Virtio Peer"
+	depends on 64BIT && PCI && X86
+	select VIRTIO
+	select VIRTUALIZATION
+	default m
+
+endmenu
