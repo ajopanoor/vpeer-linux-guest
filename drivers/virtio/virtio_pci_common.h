@@ -64,10 +64,13 @@ struct virtio_pci_device {
 	void __iomem *device;
 	/* Base of vq notifications (non-legacy mode). */
 	void __iomem *notify_base;
+	/* Base of window area for virtio-peer devices */
+	void __iomem *window;
 
 	/* So we can sanity-check accesses. */
 	size_t notify_len;
 	size_t device_len;
+	size_t window_len;
 
 	/* Capability for when we need to map notifications per-vq. */
 	int notify_map_cap;

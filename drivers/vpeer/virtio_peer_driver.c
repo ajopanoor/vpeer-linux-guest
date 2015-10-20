@@ -219,9 +219,8 @@ static int vpeer_probe(struct virtio_device *vdev)
 		goto vqs_del;
 	}
 
-	vdev->config->get(vdev,
-			offsetof(struct virtio_peer_config, queue_magic),
-			&vp->cfg.queue_magic, sizeof(unsigned int));
+	vdev->config->get(vdev, offsetof(struct virtio_peer_config, queue_magic),
+			&vp->cfg.queue_magic, sizeof(vp->cfg.queue_magic));
 
 	dev_info(&vdev->dev, "num_bufs %u bufs va %p, dma 0x%llx magic 0x%x\n",
 					vp->num_bufs, bufs_va,

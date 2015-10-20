@@ -312,6 +312,109 @@ static void *alloc_virtqueue_pages(int *num)
 	return alloc_pages_exact(vring_pci_size(*num), GFP_KERNEL|__GFP_ZERO);
 }
 
+static struct virtqueue *setup_vq_window(struct virtio_pci_device *vp_dev,
+				  struct virtio_pci_vq_info *info,
+				  unsigned index,
+				  void (*callback)(struct virtqueue *vq),
+				  const char *name,
+				  u16 msix_vec)
+{
+	struct virtio_pci_common_cfg __iomem *cfg = vp_dev->common;
+	struct virtqueue *vq;
+	u16 num, off;
+	int err;
+
+	if (index >= vp_ioread16(&cfg->num_queues))
+		return ERR_PTR(-ENOENT);
+
+	/* Select the queue we're interested in */
+	vp_iowrite16(index, &cfg->queue_select);
+
+	/* Check if queue is either not available or already active. */
+	num = vp_ioread16(&cfg->queue_size);
+	if (!num || vp_ioread16(&cfg->queue_enable))
+		return ERR_PTR(-ENOENT);
+
+	if (num & (num - 1)) {
+		dev_warn(&vp_dev->pci_dev->dev, "bad queue size %u", num);
+		return ERR_PTR(-EINVAL);
+	}
+
+	/* get offset of notification word for this vq */
+	off = vp_ioread16(&cfg->queue_notify_off);
+
+	info->num = num;
+	info->msix_vector = msix_vec;
+
+	info->queue = alloc_virtqueue_pages(&info->num);
+	if (info->queue == NULL)
+		return ERR_PTR(-ENOMEM);
+
+	/* create the vring */
+	vq = vring_new_virtqueue(index, info->num,
+				 SMP_CACHE_BYTES, &vp_dev->vdev,
+				 true, info->queue, vp_notify, callback, name);
+	if (!vq) {
+		err = -ENOMEM;
+		goto err_new_queue;
+	}
+
+	/* activate the queue */
+	vp_iowrite16(num, &cfg->queue_size);
+	vp_iowrite64_twopart(virt_to_phys(info->queue),
+			     &cfg->queue_desc_lo, &cfg->queue_desc_hi);
+	vp_iowrite64_twopart(virt_to_phys(virtqueue_get_avail(vq)),
+			     &cfg->queue_avail_lo, &cfg->queue_avail_hi);
+	vp_iowrite64_twopart(virt_to_phys(virtqueue_get_used(vq)),
+			     &cfg->queue_used_lo, &cfg->queue_used_hi);
+
+	if (vp_dev->notify_base) {
+		/* offset should not wrap */
+		if ((u64)off * vp_dev->notify_offset_multiplier + 2
+		    > vp_dev->notify_len) {
+			dev_warn(&vp_dev->pci_dev->dev,
+				 "bad notification offset %u (x %u) "
+				 "for queue %u > %zd",
+				 off, vp_dev->notify_offset_multiplier,
+				 index, vp_dev->notify_len);
+			err = -EINVAL;
+			goto err_map_notify;
+		}
+		vq->priv = (void __force *)vp_dev->notify_base +
+			off * vp_dev->notify_offset_multiplier;
+	} else {
+		vq->priv = (void __force *)map_capability(vp_dev->pci_dev,
+					  vp_dev->notify_map_cap, 2, 2,
+					  off * vp_dev->notify_offset_multiplier, 2,
+					  NULL);
+	}
+
+	if (!vq->priv) {
+		err = -ENOMEM;
+		goto err_map_notify;
+	}
+
+	if (msix_vec != VIRTIO_MSI_NO_VECTOR) {
+		vp_iowrite16(msix_vec, &cfg->queue_msix_vector);
+		msix_vec = vp_ioread16(&cfg->queue_msix_vector);
+		if (msix_vec == VIRTIO_MSI_NO_VECTOR) {
+			err = -EBUSY;
+			goto err_assign_vector;
+		}
+	}
+
+	return vq;
+
+err_assign_vector:
+	if (!vp_dev->notify_base)
+		pci_iounmap(vp_dev->pci_dev, (void __iomem __force *)vq->priv);
+err_map_notify:
+	vring_del_virtqueue(vq);
+err_new_queue:
+	free_pages_exact(info->queue, vring_pci_size(info->num));
+	return ERR_PTR(err);
+}
+
 static struct virtqueue *setup_vq(struct virtio_pci_device *vp_dev,
 				  struct virtio_pci_vq_info *info,
 				  unsigned index,
@@ -414,6 +517,7 @@ err_new_queue:
 	free_pages_exact(info->queue, vring_pci_size(info->num));
 	return ERR_PTR(err);
 }
+
 
 static int vp_modern_find_vqs(struct virtio_device *vdev, unsigned nvqs,
 			      struct virtqueue *vqs[],
@@ -596,7 +700,7 @@ static inline void check_offsets(void)
 int virtio_pci_modern_probe(struct virtio_pci_device *vp_dev)
 {
 	struct pci_dev *pci_dev = vp_dev->pci_dev;
-	int err, common, isr, notify, device;
+	int err, common, isr, notify, device, window;
 	u32 notify_length;
 	u32 notify_offset;
 
@@ -645,6 +749,11 @@ int virtio_pci_modern_probe(struct virtio_pci_device *vp_dev)
 	 * device-specific configuration.
 	 */
 	device = virtio_pci_find_capability(pci_dev, VIRTIO_PCI_CAP_DEVICE_CFG,
+					    IORESOURCE_IO | IORESOURCE_MEM,
+					    &vp_dev->modern_bars);
+
+	/* Window capability is only mandatory for Virtio-Peer Devices */
+	window = virtio_pci_find_capability(pci_dev, VIRTIO_PCI_CAP_WINDOW_CFG,
 					    IORESOURCE_IO | IORESOURCE_MEM,
 					    &vp_dev->modern_bars);
 
@@ -710,10 +819,20 @@ int virtio_pci_modern_probe(struct virtio_pci_device *vp_dev)
 	} else {
 		vp_dev->vdev.config = &virtio_pci_config_nodev_ops;
 	}
+	if (window) {
+		vp_dev->window = map_capability(pci_dev, window, 0, 4,
+						0, PAGE_SIZE,
+						&vp_dev->window_len);
+		if (!vp_dev->window)
+			dev_err(&pci_dev->dev,
+				"virtio_pci: missing capability %i\n", window);
 
+		dev_info(&pci_dev->dev, "virtio_pci: window region %p len %zu\n",
+				vp_dev->window, vp_dev->window_len);
+	}
 	vp_dev->config_vector = vp_config_vector;
-	vp_dev->setup_vq = setup_vq;
-	vp_dev->del_vq = del_vq;
+	vp_dev->setup_vq = (vp_dev->window ? setup_vq_window : setup_vq);
+	vp_dev->del_vq = (vp_dev->window ? del_vq_window : del_vq);
 
 	return 0;
 
