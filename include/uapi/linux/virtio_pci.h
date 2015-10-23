@@ -197,6 +197,18 @@ struct virtio_pci_cfg_cap {
 #define VIRTIO_PCI_COMMON_Q_USEDLO	48
 #define VIRTIO_PCI_COMMON_Q_USEDHI	52
 
+#define VIRTIO_PCI_WINDOW_RO_SIZE	0
+#define VIRTIO_PCI_WINDOW_RW_SIZE	4
+#define VIRTIO_PCI_WINDOW_RO_BAR	8
+#define VIRTIO_PCI_WINDOW_RW_BAR	9
+
+struct virtio_window_config {
+	uint32_t ro_win_size;
+	uint32_t rw_win_size;
+	uint8_t rw_bar;
+	uint8_t ro_bar;
+};
+
 #endif /* VIRTIO_PCI_NO_MODERN */
 
 #endif

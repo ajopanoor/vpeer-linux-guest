@@ -48,6 +48,19 @@ struct virtio_pci_vq_info {
 	unsigned msix_vector;
 };
 
+struct virtio_window {
+	/* Window specific configuration details */
+	struct virtio_window_config __iomem *wcfg;
+	/* Window config space length */
+	size_t win_cfg_len;
+	/* Read window addr */
+	void *rva;
+	/* Write window addr */
+	void *wva;
+	/* Whether virtqueues are allocated within windows */
+	bool enable;
+};
+
 /* Our device structure */
 struct virtio_pci_device {
 	struct virtio_device vdev;
@@ -64,13 +77,10 @@ struct virtio_pci_device {
 	void __iomem *device;
 	/* Base of vq notifications (non-legacy mode). */
 	void __iomem *notify_base;
-	/* Base of window area for virtio-peer devices */
-	void __iomem *window;
 
 	/* So we can sanity-check accesses. */
 	size_t notify_len;
 	size_t device_len;
-	size_t window_len;
 
 	/* Capability for when we need to map notifications per-vq. */
 	int notify_map_cap;
@@ -86,6 +96,7 @@ struct virtio_pci_device {
 
 	/* a list of queues so we can dispatch IRQs */
 	spinlock_t lock;
+
 	struct list_head virtqueues;
 
 	/* array of all queues for house-keeping */
@@ -103,6 +114,8 @@ struct virtio_pci_device {
 	unsigned msix_vectors;
 	/* Vectors allocated, excluding per-vq vectors if any */
 	unsigned msix_used_vectors;
+	/* Window configuration for Virtio Peer device support */
+	struct virtio_window window;
 
 	/* Whether we have vector per vq */
 	bool per_vq_vectors;

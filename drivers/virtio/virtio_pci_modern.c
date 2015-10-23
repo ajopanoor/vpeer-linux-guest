@@ -564,6 +564,29 @@ static void del_vq(struct virtio_pci_vq_info *info)
 	free_pages_exact(info->queue, vring_pci_size(info->num));
 }
 
+static void del_vq_window(struct virtio_pci_vq_info *info)
+{
+	struct virtqueue *vq = info->vq;
+	struct virtio_pci_device *vp_dev = to_vp_device(vq->vdev);
+
+	vp_iowrite16(vq->index, &vp_dev->common->queue_select);
+
+	if (vp_dev->msix_enabled) {
+		vp_iowrite16(VIRTIO_MSI_NO_VECTOR,
+			     &vp_dev->common->queue_msix_vector);
+		/* Flush the write out to device */
+		vp_ioread16(&vp_dev->common->queue_msix_vector);
+	}
+
+	if (!vp_dev->notify_base)
+		pci_iounmap(vp_dev->pci_dev, (void __force __iomem *)vq->priv);
+
+	vring_del_virtqueue(vq);
+
+	free_pages_exact(info->queue, vring_pci_size(info->num));
+}
+
+
 static const struct virtio_config_ops virtio_pci_config_nodev_ops = {
 	.get		= NULL,
 	.set		= NULL,
@@ -696,6 +719,32 @@ static inline void check_offsets(void)
 		     offsetof(struct virtio_pci_common_cfg, queue_used_hi));
 }
 
+void init_window(struct virtio_pci_device *vp_dev)
+{
+	struct virtio_window *vp_win = &vp_dev->window;
+	struct virtio_window_config __iomem *wcfg = vp_win->wcfg;
+	struct pci_dev *pci_dev = vp_dev->pci_dev;
+
+	vp_win->rva = pci_ioremap_bar(pci_dev, wcfg->ro_bar);
+	if(!vp_win->rva)
+		return;
+
+	vp_win->wva = pci_ioremap_bar(pci_dev, wcfg->rw_bar);
+	if(!vp_win->rva)
+		goto unmap_rva;
+
+	vp_win->enable = true;
+
+	dev_info(&pci_dev->dev, "WINDOW CFG: BARS (ro = %d, rw =%d) "
+			"SIZE (ro = %d, rw = %d) VA (ro = %p rw= %p)\n",
+			wcfg->ro_bar, wcfg->rw_bar, wcfg->ro_win_size,
+			wcfg->rw_win_size, vp_win->rva, vp_win->wva);
+	return;
+
+unmap_rva:
+	iounmap(vp_win->rva);
+}
+
 /* the PCI probing function */
 int virtio_pci_modern_probe(struct virtio_pci_device *vp_dev)
 {
@@ -820,19 +869,18 @@ int virtio_pci_modern_probe(struct virtio_pci_device *vp_dev)
 		vp_dev->vdev.config = &virtio_pci_config_nodev_ops;
 	}
 	if (window) {
-		vp_dev->window = map_capability(pci_dev, window, 0, 4,
+		vp_dev->window.wcfg = map_capability(pci_dev, window, 0, 4,
 						0, PAGE_SIZE,
-						&vp_dev->window_len);
-		if (!vp_dev->window)
+						&vp_dev->window.win_cfg_len);
+		if (!vp_dev->window.wcfg)
 			dev_err(&pci_dev->dev,
 				"virtio_pci: missing capability %i\n", window);
 
-		dev_info(&pci_dev->dev, "virtio_pci: window region %p len %zu\n",
-				vp_dev->window, vp_dev->window_len);
+		init_window(vp_dev);
 	}
 	vp_dev->config_vector = vp_config_vector;
-	vp_dev->setup_vq = (vp_dev->window ? setup_vq_window : setup_vq);
-	vp_dev->del_vq = (vp_dev->window ? del_vq_window : del_vq);
+	vp_dev->setup_vq = (vp_dev->window.enable ? setup_vq_window : setup_vq);
+	vp_dev->del_vq = (vp_dev->window.enable ? del_vq_window : del_vq);
 
 	return 0;
 
