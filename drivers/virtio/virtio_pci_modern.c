@@ -57,14 +57,14 @@ static inline void vp_iowrite32(u32 value, u32 __iomem *addr)
 	iowrite32(value, addr);
 }
 
-static void vp_iowrite64_twopart(u64 val,
+void vp_iowrite64_twopart(u64 val,
 				 __le32 __iomem *lo, __le32 __iomem *hi)
 {
 	vp_iowrite32((u32)val, lo);
 	vp_iowrite32(val >> 32, hi);
 }
 
-static void __iomem *map_capability(struct pci_dev *dev, int off,
+void __iomem *map_capability(struct pci_dev *dev, int off,
 				    size_t minlen,
 				    u32 align,
 				    u32 start, u32 size,
@@ -312,109 +312,6 @@ static void *alloc_virtqueue_pages(int *num)
 	return alloc_pages_exact(vring_pci_size(*num), GFP_KERNEL|__GFP_ZERO);
 }
 
-static struct virtqueue *setup_vq_window(struct virtio_pci_device *vp_dev,
-				  struct virtio_pci_vq_info *info,
-				  unsigned index,
-				  void (*callback)(struct virtqueue *vq),
-				  const char *name,
-				  u16 msix_vec)
-{
-	struct virtio_pci_common_cfg __iomem *cfg = vp_dev->common;
-	struct virtqueue *vq;
-	u16 num, off;
-	int err;
-
-	if (index >= vp_ioread16(&cfg->num_queues))
-		return ERR_PTR(-ENOENT);
-
-	/* Select the queue we're interested in */
-	vp_iowrite16(index, &cfg->queue_select);
-
-	/* Check if queue is either not available or already active. */
-	num = vp_ioread16(&cfg->queue_size);
-	if (!num || vp_ioread16(&cfg->queue_enable))
-		return ERR_PTR(-ENOENT);
-
-	if (num & (num - 1)) {
-		dev_warn(&vp_dev->pci_dev->dev, "bad queue size %u", num);
-		return ERR_PTR(-EINVAL);
-	}
-
-	/* get offset of notification word for this vq */
-	off = vp_ioread16(&cfg->queue_notify_off);
-
-	info->num = num;
-	info->msix_vector = msix_vec;
-
-	info->queue = alloc_virtqueue_pages(&info->num);
-	if (info->queue == NULL)
-		return ERR_PTR(-ENOMEM);
-
-	/* create the vring */
-	vq = vring_new_virtqueue(index, info->num,
-				 SMP_CACHE_BYTES, &vp_dev->vdev,
-				 true, info->queue, vp_notify, callback, name);
-	if (!vq) {
-		err = -ENOMEM;
-		goto err_new_queue;
-	}
-
-	/* activate the queue */
-	vp_iowrite16(num, &cfg->queue_size);
-	vp_iowrite64_twopart(virt_to_phys(info->queue),
-			     &cfg->queue_desc_lo, &cfg->queue_desc_hi);
-	vp_iowrite64_twopart(virt_to_phys(virtqueue_get_avail(vq)),
-			     &cfg->queue_avail_lo, &cfg->queue_avail_hi);
-	vp_iowrite64_twopart(virt_to_phys(virtqueue_get_used(vq)),
-			     &cfg->queue_used_lo, &cfg->queue_used_hi);
-
-	if (vp_dev->notify_base) {
-		/* offset should not wrap */
-		if ((u64)off * vp_dev->notify_offset_multiplier + 2
-		    > vp_dev->notify_len) {
-			dev_warn(&vp_dev->pci_dev->dev,
-				 "bad notification offset %u (x %u) "
-				 "for queue %u > %zd",
-				 off, vp_dev->notify_offset_multiplier,
-				 index, vp_dev->notify_len);
-			err = -EINVAL;
-			goto err_map_notify;
-		}
-		vq->priv = (void __force *)vp_dev->notify_base +
-			off * vp_dev->notify_offset_multiplier;
-	} else {
-		vq->priv = (void __force *)map_capability(vp_dev->pci_dev,
-					  vp_dev->notify_map_cap, 2, 2,
-					  off * vp_dev->notify_offset_multiplier, 2,
-					  NULL);
-	}
-
-	if (!vq->priv) {
-		err = -ENOMEM;
-		goto err_map_notify;
-	}
-
-	if (msix_vec != VIRTIO_MSI_NO_VECTOR) {
-		vp_iowrite16(msix_vec, &cfg->queue_msix_vector);
-		msix_vec = vp_ioread16(&cfg->queue_msix_vector);
-		if (msix_vec == VIRTIO_MSI_NO_VECTOR) {
-			err = -EBUSY;
-			goto err_assign_vector;
-		}
-	}
-
-	return vq;
-
-err_assign_vector:
-	if (!vp_dev->notify_base)
-		pci_iounmap(vp_dev->pci_dev, (void __iomem __force *)vq->priv);
-err_map_notify:
-	vring_del_virtqueue(vq);
-err_new_queue:
-	free_pages_exact(info->queue, vring_pci_size(info->num));
-	return ERR_PTR(err);
-}
-
 static struct virtqueue *setup_vq(struct virtio_pci_device *vp_dev,
 				  struct virtio_pci_vq_info *info,
 				  unsigned index,
@@ -518,7 +415,6 @@ err_new_queue:
 	return ERR_PTR(err);
 }
 
-
 static int vp_modern_find_vqs(struct virtio_device *vdev, unsigned nvqs,
 			      struct virtqueue *vqs[],
 			      vq_callback_t *callbacks[],
@@ -563,29 +459,6 @@ static void del_vq(struct virtio_pci_vq_info *info)
 
 	free_pages_exact(info->queue, vring_pci_size(info->num));
 }
-
-static void del_vq_window(struct virtio_pci_vq_info *info)
-{
-	struct virtqueue *vq = info->vq;
-	struct virtio_pci_device *vp_dev = to_vp_device(vq->vdev);
-
-	vp_iowrite16(vq->index, &vp_dev->common->queue_select);
-
-	if (vp_dev->msix_enabled) {
-		vp_iowrite16(VIRTIO_MSI_NO_VECTOR,
-			     &vp_dev->common->queue_msix_vector);
-		/* Flush the write out to device */
-		vp_ioread16(&vp_dev->common->queue_msix_vector);
-	}
-
-	if (!vp_dev->notify_base)
-		pci_iounmap(vp_dev->pci_dev, (void __force __iomem *)vq->priv);
-
-	vring_del_virtqueue(vq);
-
-	free_pages_exact(info->queue, vring_pci_size(info->num));
-}
-
 
 static const struct virtio_config_ops virtio_pci_config_nodev_ops = {
 	.get		= NULL,
@@ -717,32 +590,6 @@ static inline void check_offsets(void)
 		     offsetof(struct virtio_pci_common_cfg, queue_used_lo));
 	BUILD_BUG_ON(VIRTIO_PCI_COMMON_Q_USEDHI !=
 		     offsetof(struct virtio_pci_common_cfg, queue_used_hi));
-}
-
-void init_window(struct virtio_pci_device *vp_dev)
-{
-	struct virtio_window *vp_win = &vp_dev->window;
-	struct virtio_window_config __iomem *wcfg = vp_win->wcfg;
-	struct pci_dev *pci_dev = vp_dev->pci_dev;
-
-	vp_win->rva = pci_ioremap_bar(pci_dev, wcfg->ro_bar);
-	if(!vp_win->rva)
-		return;
-
-	vp_win->wva = pci_ioremap_bar(pci_dev, wcfg->rw_bar);
-	if(!vp_win->rva)
-		goto unmap_rva;
-
-	vp_win->enable = true;
-
-	dev_info(&pci_dev->dev, "WINDOW CFG: BARS (ro = %d, rw =%d) "
-			"SIZE (ro = %d, rw = %d) VA (ro = %p rw= %p)\n",
-			wcfg->ro_bar, wcfg->rw_bar, wcfg->ro_win_size,
-			wcfg->rw_win_size, vp_win->rva, vp_win->wva);
-	return;
-
-unmap_rva:
-	iounmap(vp_win->rva);
 }
 
 /* the PCI probing function */

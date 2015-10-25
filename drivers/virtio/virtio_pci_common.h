@@ -180,4 +180,18 @@ static inline void virtio_pci_legacy_remove(struct virtio_pci_device *vp_dev)
 int virtio_pci_modern_probe(struct virtio_pci_device *);
 void virtio_pci_modern_remove(struct virtio_pci_device *);
 
+/*  Window config routines */
+void init_window(struct virtio_pci_device *);
+void del_vq_window(struct virtio_pci_vq_info *);
+struct virtqueue *setup_vq_window(struct virtio_pci_device *,
+				  struct virtio_pci_vq_info *,
+				  unsigned ,
+				  void (*)(struct virtqueue *),
+				  const char *,
+				  u16 );
+void vp_iowrite64_twopart(u64, __le32 __iomem *, __le32 __iomem *);
+void __iomem *map_capability(struct pci_dev *, int, size_t, u32, u32, u32,
+		size_t *);
+
+
 #endif
