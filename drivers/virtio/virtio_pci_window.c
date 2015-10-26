@@ -4,7 +4,7 @@
  * This module allows virtio peer  devices to be used over a virtual PCI device.
  * This can be used with QEMU based VMMs like KVM or Xen.
  *
- * Copyright Huawei Technologies 2015
+ * Copyright Huawei Technologies 2015.
  *
  * Authors:
  *  	Ajo Jose Panoor<ajo.jose.panoor@huawei.com>
@@ -15,8 +15,9 @@
  */
 #define VIRTIO_PCI_NO_LEGACY
 #include "virtio_pci_common.h"
-#define LOCAL_VQ	0
-#define REMOTE_VQ	1
+
+#define RX_VQ_IDX	0
+#define TX_VQ_IDX	1
 
 #define WINDOW_ALIGN(addr, align)	(((addr) + (align -1)) & ~(align -1))
 
@@ -27,7 +28,7 @@ static void *window_alloc_virtqueue_vrings(struct virtio_pci_device *vp_dev,
 	size_t desc_size, avail_size, used_size;
 	void *rva, *wva;
 
-	if (qtype == LOCAL_VQ) {
+	if (qtype == RX_VQ_IDX) {
 		wva = vp_win->wva;
 		rva = vp_win->rva;
 	} else {
@@ -43,11 +44,11 @@ static void *window_alloc_virtqueue_vrings(struct virtio_pci_device *vp_dev,
 	used_size = PAGE_ALIGN(WINDOW_ALIGN((sizeof(__virtio16) * 3 +
 			sizeof(struct vring_used_elem) * num),
 			SMP_CACHE_BYTES));
-	vr->num = num;
+	vr->num = VRING_USER_DEFINED;
 	vr->desc = wva;
 	vr->avail = wva + desc_size;
 	vr->used = rva + desc_size + avail_size;
-	return wva;
+	return (void *)vr;
 }
 
 struct virtqueue *setup_vq_window(struct virtio_pci_device *vp_dev,
@@ -60,10 +61,11 @@ struct virtqueue *setup_vq_window(struct virtio_pci_device *vp_dev,
 	struct virtio_pci_window_cfg __iomem *wcfg = vp_dev->window.wcfg;
 	struct virtio_pci_common_cfg __iomem *cfg = vp_dev->common;
 	struct virtio_window *vp_win = &vp_dev->window;
+	struct pci_dev *pci_dev = vp_dev->pci_dev;
 	struct virtqueue *vq;
 	struct vring vr;
 	u16 num, off;
-	int err;
+	int err, qtype;
 
 	if (index >= ioread16(&cfg->num_queues))
 		return ERR_PTR(-ENOENT);
@@ -89,8 +91,8 @@ struct virtqueue *setup_vq_window(struct virtio_pci_device *vp_dev,
 
 	info->num = num;
 	info->msix_vector = msix_vec;
-
-	info->queue = window_alloc_virtqueue_vrings(vp_dev, &vr, num, LOCAL_VQ);
+	qtype = (index ? RX_VQ_IDX : TX_VQ_IDX);
+	info->queue = window_alloc_virtqueue_vrings(vp_dev, &vr, num, qtype);
 	if (info->queue == NULL)
 		return ERR_PTR(-ENOMEM);
 
@@ -102,7 +104,9 @@ struct virtqueue *setup_vq_window(struct virtio_pci_device *vp_dev,
 		err = -ENOMEM;
 		goto err_new_queue;
 	}
-
+	dev_info(&pci_dev->dev, "vq size %d, desc %p, avail %p, used %p\n",
+			info->num, vr.desc, virtqueue_get_avail(vq),
+			virtqueue_get_used(vq));
 	/* activate the queue */
 	iowrite16(num, &cfg->queue_size);
 	vp_iowrite64_twopart(virt_to_phys(info->queue),
@@ -194,8 +198,8 @@ void init_window(struct virtio_pci_device *vp_dev)
 
 	vp_win->enable = true;
 
-	dev_info(&pci_dev->dev, "WINDOW CFG: BARS (ro = %d, rw =%d) "
-			"SIZE (ro = %d, rw = %d) VA (ro = %p rw= %p)\n",
+	dev_info(&pci_dev->dev, "WINDOW CFG: BARS (ro = %d, rw = %d) "
+			"SIZE (ro = %d, rw = %d) VA (ro = %p rw = %p)\n",
 			ioread8(&wcfg->ro_bar),ioread8(&wcfg->rw_bar),
 			ioread32(&wcfg->ro_win_size),
 			ioread32(&wcfg->rw_win_size),

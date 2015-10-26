@@ -245,8 +245,6 @@ static int vpeer_probe(struct virtio_device *vdev)
 		WARN_ON(err); /* sanity check; this can't really happen */
 	}
 
-	virtqueue_disable_cb(vp->svq);
-
 	g_vp = vdev->priv = vp; /* FIXME */
 
 	notify = virtqueue_kick_prepare(vp->rvq);

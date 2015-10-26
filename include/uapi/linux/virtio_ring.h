@@ -140,6 +140,27 @@ struct vring {
 #define vring_used_event(vr) ((vr)->avail->ring[(vr)->num])
 #define vring_avail_event(vr) (*(__virtio16 *)&(vr)->used->ring[(vr)->num])
 
+#define VRING_USER_DEFINED	0x76727564
+static inline void vring_init(struct vring *vr, unsigned int num, void *p,
+			      unsigned long align)
+{
+	struct vring  *__vr = p;
+
+	if(__vr->num == VRING_USER_DEFINED) {
+		vr->num = num;
+		vr->desc = __vr->desc;
+		vr->avail = __vr->avail;
+		vr->used = __vr->used;
+		return;
+	}
+	vr->num = num;
+	vr->desc = p;
+	vr->avail = p + num*sizeof(struct vring_desc);
+	vr->used = (void *)(((uintptr_t)&vr->avail->ring[num] + sizeof(__virtio16)
+		+ align-1) & ~(align - 1));
+}
+
+#if 0
 static inline void vring_init(struct vring *vr, unsigned int num, void *p,
 			      unsigned long align)
 {
@@ -149,6 +170,7 @@ static inline void vring_init(struct vring *vr, unsigned int num, void *p,
 	vr->used = (void *)(((uintptr_t)&vr->avail->ring[num] + sizeof(__virtio16)
 		+ align-1) & ~(align - 1));
 }
+#endif
 
 static inline unsigned vring_size(unsigned int num, unsigned long align)
 {
